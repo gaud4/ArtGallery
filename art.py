@@ -419,9 +419,10 @@ class PolygonEditor:
         self.guards = sorted(chosen_guards)
         self.last_cost = total_cost
         self._refresh_view()
-        base = f"Computed {len(tris)} triangles; guards chosen: {len(self.guards)}."
-        if total_cost is not None:
-            base += f" Total cost={total_cost:.3f}. {detail}"
+        base = ""
+        # base = f"Computed {len(tris)} triangles; guards chosen: {len(self.guards)}."
+        # if total_cost is not None:
+        #     base += f" Total cost={total_cost:.3f}. {detail}"
         return True, base
 
     # ============ Cost evaluation ============
@@ -636,10 +637,46 @@ class ArtGalleryApp:
         self.root.title("Art Gallery Problem - Guards via Triangulation and 3-Coloring")
         self.root.minsize(900, 600)
 
-        # Layout: left controls, right canvas
-        self.sidebar = ttk.Frame(root, padding=(10, 10))
-        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        # --- Sidebar with scrollbar ---
+        SIDEBAR_WIDTH = 270  # Fixed width for sidebar
+        
+        sidebar_frame = ttk.Frame(root, width=SIDEBAR_WIDTH)
+        sidebar_frame.pack(side=tk.LEFT, fill=tk.Y)
+        sidebar_frame.pack_propagate(False)  # Prevent frame from shrinking
 
+        sidebar_canvas = tk.Canvas(sidebar_frame, borderwidth=0, background="#f8f8f8", width=SIDEBAR_WIDTH - 20)  # 20px for scrollbar
+        sidebar_canvas.pack(side=tk.LEFT, fill=tk.Y, expand=True)
+
+        scrollbar = ttk.Scrollbar(sidebar_frame, orient="vertical", command=sidebar_canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        sidebar_canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.sidebar = ttk.Frame(sidebar_canvas, width=SIDEBAR_WIDTH - 20)  # Match canvas width
+        self.sidebar.bind(
+            "<Configure>",
+            lambda e: sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox("all"))
+        )
+        
+        sidebar_canvas.create_window((0, 0), window=self.sidebar, anchor="nw", width=SIDEBAR_WIDTH - 20)  # Fix window width
+
+        # Bind mouse wheel events to the canvas
+        def _on_mousewheel(event):
+            sidebar_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+    
+        sidebar_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # Bind enter/leave to only scroll when mouse is over sidebar
+        def _bind_mousewheel(event):
+            sidebar_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+    
+        def _unbind_mousewheel(event):
+            sidebar_canvas.unbind_all("<MouseWheel>")
+
+        sidebar_canvas.bind("<Enter>", _bind_mousewheel)
+        sidebar_canvas.bind("<Leave>", _unbind_mousewheel)
+
+        # --- Main canvas ---
         self.canvas = tk.Canvas(root, bg="#ffffff", highlightthickness=0)
         self.canvas.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
@@ -698,11 +735,7 @@ class ArtGalleryApp:
             ttk.Label(stats_frame, textvariable=self.stats_vars[key]).grid(row=r, column=0, sticky="w")
             r += 1
 
-        # Toggle button and Class-wise stats (collapsible)
-        self.class_panel_visible = True
-        self.btn_toggle_class = ttk.Button(self.sidebar, text="Hide Class-wise Stats", command=self._toggle_class_panel)
-        self.btn_toggle_class.pack(fill=tk.X, padx=10, pady=(4, 0))
-
+        # Class-wise stats (always visible)
         self.class_frame = ttk.LabelFrame(self.sidebar, text="Class-wise costs (0/1/2)")
         self.class_frame.pack(fill=tk.X, padx=10, pady=6)
         self.class_vars: Dict[str, tk.StringVar] = {
@@ -716,8 +749,8 @@ class ArtGalleryApp:
 
         # Replace old freeform status label with concise hint-only label
         self.status_var = tk.StringVar(value="Add vertices → Close → Socket → Costs → Compute")
-        self.status_label = ttk.Label(self.sidebar, textvariable=self.status_var, wraplength=240, justify="left", foreground="#555")
-        self.status_label.pack(fill=tk.X, padx=10, pady=4)
+        # self.status_label = ttk.Label(self.sidebar, textvariable=self.status_var, wraplength=240, justify="left", foreground="#555")
+        # self.status_label.pack(fill=tk.X, padx=10, pady=4)
 
         # Interactions
         self.mode = "add"
