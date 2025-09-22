@@ -2,6 +2,7 @@ import json
 import math
 import sys
 import tkinter as tk
+from tkinter import ttk
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Set
 
@@ -351,6 +352,11 @@ class PolygonEditor:
         self.cost_wire_per_unit: float = 1.0
         self.cost_camera: float = 1.0
         self.last_cost: Optional[float] = None
+        # View options
+        self.show_opt_only: bool = False
+        # Stats for UI
+        self.stats: Dict[str, float] = {}
+        self.class_stats: Dict[int, Dict[str, float]] = {}
 
     def add_point(self, p: Point):
         if self.closed:
@@ -457,7 +463,7 @@ class PolygonEditor:
         cw = (s_i - s_to) % perim
         return min(ccw, cw)
 
-    def _cost_for_set(self, indices: List[int]) -> Tuple[float, str]:
+    def _cost_for_set(self, indices: List[int]) -> Tuple[float, str, float, float, float]:
         camera_cost = self.cost_camera * len(indices)
         wire_cost = 0.0
         detail = ""
@@ -465,7 +471,7 @@ class PolygonEditor:
         if s is None:
             # No socket, only camera cost
             total = camera_cost
-            return total, f"No socket set; camera-only ({len(indices)} cams)."
+            return total, f"No socket set; camera-only ({len(indices)} cams).", 0.0, camera_cost, 0.0
         # sum minimal boundary distances
         dsum = 0.0
         for i in indices:
@@ -474,7 +480,7 @@ class PolygonEditor:
         wire_cost = self.cost_wire_per_unit * dsum
         total = camera_cost + wire_cost
         detail = f"wire={wire_cost:.3f} (sum len {dsum:.3f}) + cams={camera_cost:.3f}"
-        return total, detail
+        return total, detail, dsum, camera_cost, wire_cost
 
     def _choose_guards_with_cost(self, colors: Dict[int, int]) -> Tuple[List[int], Optional[float], str]:
         # Default to minimal color class if no socket or no costs provided
@@ -483,18 +489,44 @@ class PolygonEditor:
             classes[c].append(v)
         candidates = [classes[0], classes[1], classes[2]]
         best_set: List[int] = min(candidates, key=len)
-        if self.socket_edge is None:
-            return best_set, None, "(no socket: minimal color class)"
         # Evaluate costs per class and take min
         best_total = None
         best_detail = ""
         best_choice = best_set
-        for cls in candidates:
-            total, detail = self._cost_for_set(cls)
+        best_cls_id = None
+        best_wire_len = 0.0
+        best_wire_cost = 0.0
+        best_cam_cost = 0.0
+        # compute per-class stats regardless of socket presence
+        self.class_stats = {}
+        for cls_id, cls in enumerate([classes[0], classes[1], classes[2]]):
+            total, detail, dsum, cam_c, wire_c = self._cost_for_set(cls)
+            self.class_stats[cls_id] = {
+                "size": float(len(cls)),
+                "wire_len": float(dsum),
+                "wire_cost": float(wire_c),
+                "cam_cost": float(cam_c),
+                "total_cost": float(total),
+            }
             if best_total is None or total < best_total:
                 best_total = total
                 best_detail = f"chose color-class |V|={len(cls)}; {detail}"
                 best_choice = cls
+                best_cls_id = cls_id
+                best_wire_len = dsum
+                best_wire_cost = wire_c
+                best_cam_cost = cam_c
+        # record stats
+        self.stats = {
+            "n": float(len(self.points)),
+            "tri": float(max(len(self.points) - 2, 0)),
+            "guards": float(len(best_choice)),
+            "wire_len": float(best_wire_len),
+            "wire_cost": float(best_wire_cost),
+            "cam_cost": float(best_cam_cost),
+            "total_cost": float(best_total if best_total is not None else 0.0),
+            "class": float(best_cls_id if best_cls_id is not None else -1),
+        }
         return best_choice, best_total, best_detail
 
     # ============ Rendering ============
@@ -505,9 +537,9 @@ class PolygonEditor:
         pts = self.points
         self.viewport.fit_points(pts, padding=20.0)
 
-        # Draw diagonals first
+        # Draw diagonals (always show, even in optimal-only mode)
         for i, j in self.diagonals:
-            self._draw_segment(pts[i], pts[j], w, h, fill="#cccccc", width=1, dash=(3, 3))
+            self._draw_segment(pts[i], pts[j], w, h, fill="#bdc3c7", width=1, dash=(3, 3))
 
         # Draw polygon edges
         if len(pts) >= 2:
@@ -516,19 +548,63 @@ class PolygonEditor:
                 b = pts[(i + 1) % len(pts)]
                 self._draw_segment(a, b, w, h, fill="#333333", width=2)
 
-        # Draw vertices with color if available
+        # Draw vertices with color or only guards
         r = 5
-        for idx, p in enumerate(pts):
-            sx, sy = self.viewport.world_to_screen(p, w, h)
-            col = {0: "#e74c3c", 1: "#3498db", 2: "#2ecc71"}.get(self.colors.get(idx, -1), "#555555")
-            outline = "#f39c12" if self.selected_index == idx else "white"
-            self.canvas.create_oval(sx - r, sy - r, sx + r, sy + r, fill=col, outline=outline, width=2 if self.selected_index == idx else 1)
+        guard_set = set(self.guards)
+        if self.show_opt_only:
+            # Show all vertices; optimal green, others gray
+            for idx, p in enumerate(pts):
+                sx, sy = self.viewport.world_to_screen(p, w, h)
+                col = "#27ae60" if idx in guard_set else "#bdc3c7"
+                outline = "#f39c12" if self.selected_index == idx else "white"
+                self.canvas.create_oval(sx - r, sy - r, sx + r, sy + r, fill=col, outline=outline, width=2 if self.selected_index == idx else 1)
+        else:
+            for idx, p in enumerate(pts):
+                sx, sy = self.viewport.world_to_screen(p, w, h)
+                base = {0: "#e74c3c", 1: "#2980b9", 2: "#8e44ad"}.get(self.colors.get(idx, -1), "#7f8c8d")
+                col = "#27ae60" if idx in guard_set else base
+                outline = "#f39c12" if self.selected_index == idx else "white"
+                self.canvas.create_oval(sx - r, sy - r, sx + r, sy + r, fill=col, outline=outline, width=2 if self.selected_index == idx else 1)
 
-        # Draw guards as larger stars
-        gr = 7
-        for gi in self.guards:
-            sx, sy = self.viewport.world_to_screen(pts[gi], w, h)
-            self.canvas.create_oval(sx - gr, sy - gr, sx + gr, sy + gr, outline="#f1c40f", width=3)
+        # Draw wires from guards to socket when present
+        if self.socket_edge is not None and self.guards:
+            n = len(pts)
+            k = self.socket_edge % n
+            a = pts[k]
+            b = pts[(k + 1) % n]
+            t = max(0.0, min(1.0, self.socket_t))
+            socket_pt = (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+            edges, prefix = self._boundary_lengths()
+            perim = prefix[-1] if prefix else 0.0
+            _, s_socket = self._socket_position_and_s()
+            for gi in self.guards:
+                # choose shorter boundary direction
+                s_i = prefix[gi]
+                ccw = (s_socket - s_i) % perim
+                cw = (s_i - s_socket) % perim
+                go_ccw = ccw <= cw
+                path: List[Point] = []
+                cur = gi
+                if go_ccw:
+                    while True:
+                        path.append(pts[cur])
+                        if cur == k:
+                            break
+                        cur = (cur + 1) % n
+                else:
+                    while True:
+                        path.append(pts[cur])
+                        prev = (cur - 1) % n
+                        if prev == k:
+                            break
+                        cur = prev
+                path.append(socket_pt)
+                if len(path) >= 2:
+                    coords: List[int] = []
+                    for P in path:
+                        x, y = self.viewport.world_to_screen(P, w, h)
+                        coords.extend([x, y])
+                    self.canvas.create_line(*coords, fill="#f1c40f", width=3)
 
         # Draw socket if set
         if self.socket_edge is not None and pts:
@@ -540,7 +616,7 @@ class PolygonEditor:
             x = a[0] + t * (b[0] - a[0])
             y = a[1] + t * (b[1] - a[1])
             sx, sy = self.viewport.world_to_screen((x, y), w, h)
-            self.canvas.create_rectangle(sx - 5, sy - 5, sx + 5, sy + 5, outline="#8e44ad", width=2)
+            self.canvas.create_rectangle(sx - 5, sy - 5, sx + 5, sy + 5, outline="#8e44ad", fill="#dcd6f7", width=2)
 
         # Status text
         status = "" if not self.closed else ("Simple" if is_simple_polygon(pts) else "Non-simple")
@@ -561,43 +637,87 @@ class ArtGalleryApp:
         self.root.minsize(900, 600)
 
         # Layout: left controls, right canvas
-        self.sidebar = tk.Frame(root)
+        self.sidebar = ttk.Frame(root, padding=(10, 10))
         self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
 
-        self.canvas = tk.Canvas(root, bg="white")
+        self.canvas = tk.Canvas(root, bg="#ffffff", highlightthickness=0)
         self.canvas.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
         self.editor = PolygonEditor(self.canvas)
 
         # Controls
-        self.btn_add_mode = tk.Button(self.sidebar, text="Add Mode (Click)", command=self._set_add_mode)
-        self.btn_move_mode = tk.Button(self.sidebar, text="Move Mode (Drag)", command=self._set_move_mode)
-        self.btn_delete_mode = tk.Button(self.sidebar, text="Delete Mode (Click)", command=self._set_delete_mode)
-        self.btn_socket_mode = tk.Button(self.sidebar, text="Socket Mode (Click Edge)", command=self._set_socket_mode)
-        self.btn_close = tk.Button(self.sidebar, text="Close Polygon", command=self._close_poly)
-        self.btn_compute = tk.Button(self.sidebar, text="Compute Guards", command=self._compute)
-        self.btn_reset = tk.Button(self.sidebar, text="Reset", command=self._reset)
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("TButton", padding=6)
+        style.configure("TLabel", padding=2)
 
-        self.btn_save = tk.Button(self.sidebar, text="Save JSON", command=self._save)
-        self.btn_load = tk.Button(self.sidebar, text="Load JSON", command=self._load)
-        self.btn_export = tk.Button(self.sidebar, text="Export PNG", command=self._export_png)
+        self.btn_add_mode = ttk.Button(self.sidebar, text="Add Mode (Click)", command=self._set_add_mode)
+        self.btn_move_mode = ttk.Button(self.sidebar, text="Move Mode (Drag)", command=self._set_move_mode)
+        self.btn_delete_mode = ttk.Button(self.sidebar, text="Delete Mode (Click)", command=self._set_delete_mode)
+        self.btn_socket_mode = ttk.Button(self.sidebar, text="Socket Mode (Click Edge)", command=self._set_socket_mode)
+        self.btn_toggle_opt = ttk.Button(self.sidebar, text="Show Optimal Only", command=self._toggle_opt)
+        self.btn_close = ttk.Button(self.sidebar, text="Close Polygon", command=self._close_poly)
+        self.btn_compute = ttk.Button(self.sidebar, text="Compute Guards", command=self._compute)
+        self.btn_reset = ttk.Button(self.sidebar, text="Reset", command=self._reset)
 
-        for w in [self.btn_add_mode, self.btn_move_mode, self.btn_delete_mode, self.btn_socket_mode, self.btn_close, self.btn_compute, self.btn_reset, self.btn_save, self.btn_load, self.btn_export]:
+        self.btn_save = ttk.Button(self.sidebar, text="Save JSON", command=self._save)
+        self.btn_load = ttk.Button(self.sidebar, text="Load JSON", command=self._load)
+        self.btn_export = ttk.Button(self.sidebar, text="Export PNG", command=self._export_png)
+
+        for w in [self.btn_add_mode, self.btn_move_mode, self.btn_delete_mode, self.btn_socket_mode, self.btn_toggle_opt, self.btn_close, self.btn_compute, self.btn_reset, self.btn_save, self.btn_load, self.btn_export]:
             w.pack(fill=tk.X, padx=10, pady=6)
 
         # Cost inputs
-        cost_frame = tk.LabelFrame(self.sidebar, text="Costs")
+        cost_frame = ttk.LabelFrame(self.sidebar, text="Costs")
         cost_frame.pack(fill=tk.X, padx=10, pady=6)
-        tk.Label(cost_frame, text="Wire per unit:").grid(row=0, column=0, sticky="w")
-        tk.Label(cost_frame, text="Camera cost:").grid(row=1, column=0, sticky="w")
+        ttk.Label(cost_frame, text="Wire per unit:").grid(row=0, column=0, sticky="w")
+        ttk.Label(cost_frame, text="Camera cost:").grid(row=1, column=0, sticky="w")
         self.var_wire = tk.StringVar(value="1.0")
         self.var_cam = tk.StringVar(value="1.0")
-        tk.Entry(cost_frame, textvariable=self.var_wire, width=8).grid(row=0, column=1, sticky="e")
-        tk.Entry(cost_frame, textvariable=self.var_cam, width=8).grid(row=1, column=1, sticky="e")
+        ttk.Entry(cost_frame, textvariable=self.var_wire, width=10).grid(row=0, column=1, sticky="e")
+        ttk.Entry(cost_frame, textvariable=self.var_cam, width=10).grid(row=1, column=1, sticky="e")
 
-        self.status_var = tk.StringVar(value="Click to add vertices. Close polygon, set socket (optional), enter costs, then Compute.")
-        self.status_label = tk.Label(self.sidebar, textvariable=self.status_var, wraplength=220, justify="left")
-        self.status_label.pack(fill=tk.X, padx=10, pady=6)
+        # Stats panel
+        stats_frame = ttk.LabelFrame(self.sidebar, text="Statistics")
+        stats_frame.pack(fill=tk.X, padx=10, pady=6)
+        self.stats_vars: Dict[str, tk.StringVar] = {
+            "n": tk.StringVar(value="n: -"),
+            "tri": tk.StringVar(value="triangles: -"),
+            "guards": tk.StringVar(value="guards: -"),
+            "class": tk.StringVar(value="class: -"),
+            "wire_len": tk.StringVar(value="wire length: -"),
+            "wire_cost": tk.StringVar(value="wire cost: -"),
+            "cam_cost": tk.StringVar(value="camera cost: -"),
+            "total_cost": tk.StringVar(value="total cost: -"),
+        }
+        r = 0
+        for key in ["n", "tri", "guards", "class", "wire_len", "wire_cost", "cam_cost", "total_cost"]:
+            ttk.Label(stats_frame, textvariable=self.stats_vars[key]).grid(row=r, column=0, sticky="w")
+            r += 1
+
+        # Toggle button and Class-wise stats (collapsible)
+        self.class_panel_visible = True
+        self.btn_toggle_class = ttk.Button(self.sidebar, text="Hide Class-wise Stats", command=self._toggle_class_panel)
+        self.btn_toggle_class.pack(fill=tk.X, padx=10, pady=(4, 0))
+
+        self.class_frame = ttk.LabelFrame(self.sidebar, text="Class-wise costs (0/1/2)")
+        self.class_frame.pack(fill=tk.X, padx=10, pady=6)
+        self.class_vars: Dict[str, tk.StringVar] = {
+            "c0": tk.StringVar(value="0: size -, total -, wire -, cam -"),
+            "c1": tk.StringVar(value="1: size -, total -, wire -, cam -"),
+            "c2": tk.StringVar(value="2: size -, total -, wire -, cam -"),
+        }
+        ttk.Label(self.class_frame, textvariable=self.class_vars["c0"]).pack(anchor="w")
+        ttk.Label(self.class_frame, textvariable=self.class_vars["c1"]).pack(anchor="w")
+        ttk.Label(self.class_frame, textvariable=self.class_vars["c2"]).pack(anchor="w")
+
+        # Replace old freeform status label with concise hint-only label
+        self.status_var = tk.StringVar(value="Add vertices → Close → Socket → Costs → Compute")
+        self.status_label = ttk.Label(self.sidebar, textvariable=self.status_var, wraplength=240, justify="left", foreground="#555")
+        self.status_label.pack(fill=tk.X, padx=10, pady=4)
 
         # Interactions
         self.mode = "add"
@@ -623,6 +743,21 @@ class ArtGalleryApp:
         self.mode = "socket"
         self.status_var.set("Socket Mode: click near an edge to place the socket.")
 
+    def _toggle_opt(self):
+        self.editor.show_opt_only = not self.editor.show_opt_only
+        txt = "Show All" if self.editor.show_opt_only else "Show Optimal Only"
+        self.btn_toggle_opt.config(text=txt)
+        self.editor._refresh_view()
+
+    def _toggle_class_panel(self):
+        self.class_panel_visible = not self.class_panel_visible
+        if self.class_panel_visible:
+            self.class_frame.pack(fill=tk.X, padx=10, pady=6)
+            self.btn_toggle_class.config(text="Hide Class-wise Stats")
+        else:
+            self.class_frame.pack_forget()
+            self.btn_toggle_class.config(text="Show Class-wise Stats")
+
     def _close_poly(self):
         self.editor.close_polygon()
         self.status_var.set("Polygon closed.")
@@ -637,6 +772,7 @@ class ArtGalleryApp:
             return
         ok, msg = self.editor.compute()
         self.status_var.set(msg)
+        self._refresh_stats()
 
     def _reset(self):
         self.editor.reset()
@@ -655,6 +791,7 @@ class ArtGalleryApp:
             self.status_var.set("Loaded polygon.json")
         except Exception as e:
             self.status_var.set(f"Load failed: {e}")
+        self._refresh_stats()
 
     def _export_png(self):
         try:
@@ -749,7 +886,15 @@ class ArtGalleryApp:
             if best is not None:
                 self.editor.socket_edge = best
                 self.editor.socket_t = best_t
-                self.editor._refresh_view()
+                # Auto-recompute with current costs
+                try:
+                    self.editor.cost_wire_per_unit = float(self.var_wire.get())
+                    self.editor.cost_camera = float(self.var_cam.get())
+                except Exception:
+                    pass
+                ok, msg = self.editor.compute()
+                self.status_var.set(msg if ok else "")
+                self._refresh_stats()
 
     def _on_drag(self, event):
         if self.mode == "move" and self.editor.drag_index is not None and not self.editor.closed:
@@ -761,10 +906,50 @@ class ArtGalleryApp:
             self.editor.colors.clear()
             self.editor.guards.clear()
             self.editor._refresh_view()
+            self._refresh_stats()
 
     def _on_release(self, event):
         if self.mode == "move":
             self.editor.drag_index = None
+
+    def _refresh_stats(self):
+        st = getattr(self.editor, "stats", {}) or {}
+        def fmt(k, fmt_spec="{:.3f}"):
+            v = st.get(k)
+            if v is None:
+                return "-"
+            try:
+                if k in ("n", "tri", "guards", "class"):
+                    return str(int(v)) if v >= 0 else "-"
+                return fmt_spec.format(float(v))
+            except Exception:
+                return str(v)
+        if hasattr(self, "stats_vars"):
+            self.stats_vars["n"].set(f"n: {fmt('n','{:.0f}')} ")
+            self.stats_vars["tri"].set(f"triangles: {fmt('tri','{:.0f}')} ")
+            cls = fmt('class','{:.0f}')
+            self.stats_vars["class"].set(f"class: {cls}")
+            self.stats_vars["guards"].set(f"guards: {fmt('guards','{:.0f}')} ")
+            self.stats_vars["wire_len"].set(f"wire length: {fmt('wire_len')} ")
+            self.stats_vars["wire_cost"].set(f"wire cost: {fmt('wire_cost')} ")
+            self.stats_vars["cam_cost"].set(f"camera cost: {fmt('cam_cost')} ")
+            self.stats_vars["total_cost"].set(f"total cost: {fmt('total_cost')} ")
+        # Update class-wise lines
+        cs = getattr(self.editor, "class_stats", {}) or {}
+        def cf(cid: int, key: str, spec="{:.3f}"):
+            row = cs.get(cid)
+            if not row:
+                return "-"
+            if key == "size":
+                return str(int(row.get(key, 0)))
+            try:
+                return spec.format(float(row.get(key, 0.0)))
+            except Exception:
+                return str(row.get(key, "-"))
+        if hasattr(self, "class_vars"):
+            self.class_vars["c0"].set(f"0: size {cf(0,'size','{:.0f}')}, total {cf(0,'total_cost')}, wire {cf(0,'wire_cost')}, cam {cf(0,'cam_cost')}")
+            self.class_vars["c1"].set(f"1: size {cf(1,'size','{:.0f}')}, total {cf(1,'total_cost')}, wire {cf(1,'wire_cost')}, cam {cf(1,'cam_cost')}")
+            self.class_vars["c2"].set(f"2: size {cf(2,'size','{:.0f}')}, total {cf(2,'total_cost')}, wire {cf(2,'wire_cost')}, cam {cf(2,'cam_cost')}")
 
 
 def main():
