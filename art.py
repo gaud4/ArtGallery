@@ -63,13 +63,13 @@ def is_simple_polygon(poly: List[Point]) -> bool:
 
 
 def is_clockwise(poly: List[Point]) -> bool:
-    # signed area (shoelace)
+    # Signed area (standard shoelace). area2 > 0 => CCW, < 0 => CW
     area2 = 0.0
     for i in range(len(poly)):
         x1, y1 = poly[i]
         x2, y2 = poly[(i + 1) % len(poly)]
-        area2 += (x2 - x1) * (y2 + y1)
-    return area2 > 0  # positive for CW with this formula
+        area2 += x1 * y2 - x2 * y1
+    return area2 < 0
 
 
 def point_in_triangle(p: Point, a: Point, b: Point, c: Point) -> bool:
@@ -106,19 +106,38 @@ def ear_clipping_triangulation(poly: List[Point]) -> Tuple[List[Tuple[int, int, 
     if is_clockwise(poly):
         verts.reverse()
 
-    def is_ear(vi: int) -> bool:
-        i = verts.index(vi)
-        prev_idx = verts[(i - 1) % len(verts)]
-        next_idx = verts[(i + 1) % len(verts)]
+    def diagonal_is_internal(i_idx: int, k_idx: int, working: List[int]) -> bool:
+        a = poly[i_idx]
+        b = poly[k_idx]
+        m = len(working)
+        # Check intersection with polygon edges except edges adjacent to the diagonal endpoints
+        for t in range(m):
+            u_idx = working[t]
+            v_idx = working[(t + 1) % m]
+            # Skip edges incident to a or b
+            if u_idx in (i_idx, k_idx) or v_idx in (i_idx, k_idx):
+                continue
+            if segments_intersect(a, b, poly[u_idx], poly[v_idx], proper=True):
+                return False
+        return True
+
+    def is_ear_at(pos: int, working: List[int]) -> bool:
+        m = len(working)
+        prev_idx = working[(pos - 1) % m]
+        vi = working[pos]
+        next_idx = working[(pos + 1) % m]
         a, b, c = poly[prev_idx], poly[vi], poly[next_idx]
+        # convex corner in CCW polygon
         if not is_convex(a, b, c, ccw=True):
             return False
-        # No other vertex inside triangle abc
-        tri = (a, b, c)
-        for vk in verts:
+        # diagonal inside polygon
+        if not diagonal_is_internal(prev_idx, next_idx, working):
+            return False
+        # No other vertex strictly inside or on edges of triangle
+        for vk in working:
             if vk in (prev_idx, vi, next_idx):
                 continue
-            if point_in_triangle(poly[vk], *tri):
+            if point_in_triangle(poly[vk], a, b, c):
                 return False
         return True
 
@@ -131,10 +150,10 @@ def ear_clipping_triangulation(poly: List[Point]) -> Tuple[List[Tuple[int, int, 
     while len(working) > 3 and fail_safe < 10000:
         ear_found = False
         for i in range(len(working)):
-            prev_i = working[(i - 1) % len(working)]
-            vi = working[i]
-            next_i = working[(i + 1) % len(working)]
-            if is_ear(vi):
+            if is_ear_at(i, working):
+                prev_i = working[(i - 1) % len(working)]
+                vi = working[i]
+                next_i = working[(i + 1) % len(working)]
                 triangles.append((prev_i, vi, next_i))
                 diagonals.append((prev_i, next_i))
                 del working[i]
@@ -148,6 +167,8 @@ def ear_clipping_triangulation(poly: List[Point]) -> Tuple[List[Tuple[int, int, 
                 next_i = working[(i + 1) % len(working)]
                 a, b, c = poly[prev_i], poly[vi], poly[next_i]
                 if not is_convex(a, b, c, ccw=True):
+                    continue
+                if not diagonal_is_internal(prev_i, next_i, working):
                     continue
                 ok = True
                 for vk in working:
